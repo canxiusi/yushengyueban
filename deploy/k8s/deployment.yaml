@@ -1,0 +1,259 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-platform
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: agent-platform
+data:
+  SERVICE_HOST: "0.0.0.0"
+  SERVICE_PORT: "8000"
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  DATABASE_URL: "postgresql+asyncpg://agent:agent@postgres:5432/agent_platform"
+  REDIS_URL: "redis://redis:6379/0"
+  SANDBOX_IMAGE: "python:3.12-slim"
+  SANDBOX_NETWORK: "agent-sandbox-net"
+  SANDBOX_TIMEOUT: "300"
+  SANDBOX_MEMORY_LIMIT: "512m"
+  SANDBOX_CPU_LIMIT: "1.0"
+  MAX_CONCURRENT_TASKS: "10"
+  TASK_TIMEOUT: "600"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-secrets
+  namespace: agent-platform
+type: Opaque
+stringData:
+  LLM_API_KEY: "sk-xxx-replace-me"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-platform
+  namespace: agent-platform
+  labels:
+    app: agent-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-platform
+  template:
+    metadata:
+      labels:
+        app: agent-platform
+    spec:
+      serviceAccountName: agent-platform-sa
+      containers:
+        - name: platform
+          image: agent-platform:latest
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: platform-config
+          env:
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: LLM_API_KEY
+            - name: LLM_PROVIDER
+              value: "openai"
+            - name: LLM_MODEL
+              value: "gpt-4o"
+            - name: LLM_BASE_URL
+              value: "https://api.openai.com/v1"
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-platform
+  namespace: agent-platform
+spec:
+  selector:
+    app: agent-platform
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-platform
+  namespace: agent-platform
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/websocket-services: "agent-platform"
+spec:
+  rules:
+    - host: agent.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-platform
+                port:
+                  number: 80
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-platform-sa
+  namespace: agent-platform
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: "agent_platform"
+            - name: POSTGRES_USER
+              value: "agent"
+            - name: POSTGRES_PASSWORD
+              value: "agent"
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agent-platform
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: agent-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: agent-platform
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
